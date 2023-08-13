@@ -1,7 +1,7 @@
 
 extern crate alloc;
 use alloc::alloc::{alloc, dealloc};
-use core::{alloc::Layout, marker::PhantomData, mem::{size_of, align_of}, ptr::{NonNull, drop_in_place}};
+use core::{alloc::Layout, marker::PhantomData, mem::{size_of, align_of, MaybeUninit}, ptr::{NonNull, drop_in_place}};
 
 /// A heap-allocated circular buffer.
 /// ```rust
@@ -17,6 +17,7 @@ use core::{alloc::Layout, marker::PhantomData, mem::{size_of, align_of}, ptr::{N
 /// ```
 pub struct RingBuffer<T> {
     data: NonNull<T>,
+    // TODO: It may be better to store the mask (ie. capacity - 1) rather than the capacity.
     capacity: usize,
     /// The index of the element to read next.
     read: usize,
@@ -129,6 +130,23 @@ impl<T> RingBuffer<T> {
         }
     }
 
+    /// Set the read cursor to point to `count` items past the current location.
+    /// # Safety
+    /// The buffer must be readable for `count` more elements.
+    /// The `count` must not overflow one less than the remaining `capacity`,
+    /// an equal read and write cursor indicates an empty [`RingBuffer`].
+    pub unsafe fn set_read_cursor(&mut self, count: usize) {
+        self.read = (self.read + count) & self.mask();
+    }
+    /// Set the write cursor to point to `count` items past the current location.
+    /// # Safety
+    /// The buffer must be writable for `count` more elements.
+    /// The `count` must not overflow one less than the remaining `capacity`,
+    /// an equal read and write cursor indicates an empty [`RingBuffer`].
+    pub unsafe fn set_write_cursor(&mut self, count: usize) {
+        self.write = (self.write + count) & self.mask();
+    }
+
     #[inline(always)]
     const fn mask(&self) -> usize {
         self.capacity.saturating_sub(1)
@@ -225,6 +243,35 @@ impl<T> RingBuffer<T> {
                 core::slice::from_raw_parts_mut(self.data.as_ptr().offset(self.read as isize), self.capacity - self.read),
                 core::slice::from_raw_parts_mut(self.data.as_ptr(), self.write)
             )}
+        }
+    }
+    /// Get slices over the uninitialized items.
+    pub fn spare_capacity_mut(&mut self) -> (&mut [MaybeUninit<T>], &mut [MaybeUninit<T>]) {
+        if self.read < self.write {
+            // Safety: It is guaranteed that the offsets cannot overflow an isize.
+            unsafe {
+                (
+                    core::slice::from_raw_parts_mut(
+                        self.data.as_ptr().offset(self.write as isize) as *mut MaybeUninit<T>,
+                        self.capacity - self.write
+                    ),
+                    core::slice::from_raw_parts_mut(
+                        self.data.as_ptr() as *mut MaybeUninit<T>,
+                        self.read.saturating_sub(1)
+                    )
+                )
+            }
+        } else {
+            // Safety: It is guaranteed that the offsets cannot overflow an isize.
+            unsafe {
+                (
+                    core::slice::from_raw_parts_mut(
+                        self.data.as_ptr().offset(self.write as isize) as *mut MaybeUninit<T>,
+                        (self.read - self.write).saturating_sub(1)
+                    ),
+                    &mut []
+                )
+            }
         }
     }
 
