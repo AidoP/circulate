@@ -84,12 +84,15 @@ impl<T> RingBuffer<T> {
 
         {
             let (data_lhs, data_rhs) = self.as_mut_slices();
+            let lhs_bytes = data_lhs.len() * size_of::<T>();
+            let rhs_bytes = data_rhs.len() * size_of::<T>();
             // Safety: The new `data` pointer points to a larger area than the old data.
             unsafe {
-                let lhs_bytes =  data_lhs.len() * size_of::<T>();
                 <*mut u8>::copy_from(data.as_ptr(), data_lhs.as_ptr().cast(), lhs_bytes);
-                <*mut u8>::copy_from(data.as_ptr().offset(lhs_bytes as isize), data_rhs.as_ptr().cast(), data_rhs.len() * size_of::<T>());
+                <*mut u8>::copy_from(data.as_ptr().offset(lhs_bytes as isize), data_rhs.as_ptr().cast(), rhs_bytes);
             }
+            self.read = 0;
+            self.write = lhs_bytes + rhs_bytes;
         }
 
         unsafe {
@@ -128,6 +131,12 @@ impl<T> RingBuffer<T> {
         } else {
             self.capacity - (self.read - self.write)
         }
+    }
+    /// Get the total number of items space is reserved for.
+    /// At least one slot must always be vacant so the [`RingBuffer`] is
+    /// considered full when `len() + 1 == capacity()`.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Set the read cursor to point to `count` items past the current location.
@@ -247,7 +256,8 @@ impl<T> RingBuffer<T> {
     }
     /// Get slices over the uninitialized items.
     pub fn spare_capacity_mut(&mut self) -> (&mut [MaybeUninit<T>], &mut [MaybeUninit<T>]) {
-        if self.read < self.write {
+        let read = self.read.wrapping_sub(1) & self.mask();
+        if read < self.write {
             // Safety: It is guaranteed that the offsets cannot overflow an isize.
             unsafe {
                 (
@@ -257,7 +267,7 @@ impl<T> RingBuffer<T> {
                     ),
                     core::slice::from_raw_parts_mut(
                         self.data.as_ptr() as *mut MaybeUninit<T>,
-                        self.read.saturating_sub(1)
+                        read
                     )
                 )
             }
@@ -267,7 +277,7 @@ impl<T> RingBuffer<T> {
                 (
                     core::slice::from_raw_parts_mut(
                         self.data.as_ptr().offset(self.write as isize) as *mut MaybeUninit<T>,
-                        (self.read - self.write).saturating_sub(1)
+                        read - self.write
                     ),
                     &mut []
                 )

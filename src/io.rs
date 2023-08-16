@@ -23,9 +23,9 @@ pub trait Write {
     type Error;
     /// Write `slice` to this writer.
     /// Returns the number of bytes that were written.
-    fn write(&mut self, slice: &[u8]) -> usize;
+    fn write(&mut self, slice: &[u8]) -> Result<usize, Self::Error>;
     /// Ensure written bytes are visible to other readers of the resource.
-    fn flush(&mut self);
+    fn flush(&mut self) -> Result<(), Self::Error>;
 }
 
 use core::{ptr::NonNull, marker::PhantomData, mem::MaybeUninit};
@@ -41,33 +41,78 @@ impl<S: Sized + Read + Write> BufStream<S> {
     pub fn new(stream: S) -> Self {
         Self {
             stream,
-            input: RingBuffer::new(),
-            output: RingBuffer::new(),
+            input: RingBuffer::with_capacity(0),
+            output: RingBuffer::with_capacity(0),
+        }
+    }
+    /// Create a new buffered stream with a capacity of at least `capcity` bytes
+    /// for both input and output buffers.
+    pub fn with_capacity(stream: S, capacity: usize) -> Self {
+        Self {
+            stream,
+            input: RingBuffer::with_capacity(capacity),
+            output: RingBuffer::with_capacity(capacity),
         }
     }
     /// Read from the reader in to the internal buffer.
     pub fn buffer_read(&mut self) -> Result<(), <S as Read>::Error> {
+        if self.input.full() {
+            self.input.reserve(1);
+        }
         let (lhs, rhs) = self.input.spare_capacity_mut();
+        let parts = match (lhs.len(), rhs.len()) {
+            (0, 0) => 0,
+            (_, 0) => 1,
+            (_, _) => 2,
+        };
         let count = self.stream.read_vectored(&mut [
             lhs.into(),
             rhs.into()
-        ])?;
+        ][..parts])?;
         // Safety: The count is no larger than the space available from `spare_capacity_mut`.
         unsafe {
             self.input.set_write_cursor(count)
         };
+        // TODO: a smarter growth strategy
+        if self.input.full() {
+            self.input.reserve(1);
+        }
         Ok(())
+    }
+
+    fn read_into(&mut self, buffer: &mut [MaybeUninit<u8>]) -> Result<usize, <S as Read>::Error> {
+        let (lhs, rhs) = self.input.as_mut_slices();
+        let ptr = buffer.as_mut_ptr() as *mut u8;
+        let lhs_len = buffer.len().min(lhs.len());
+        let rhs_len = (buffer.len() - lhs.len()).min(rhs.len());
+        let total_len = lhs_len + rhs_len;
+        // Safety:
+        // - `buffer` is valid for at least `lhs_len + rhs_len` writes.
+        // - `lhs` is valid for at least `lhs_len` reads.
+        // - `rhs` is valid for at least `rhs_len` reads.
+        // - Therefore the input buffer is valid for at least `total_len` reads.
+        // - `lhs`, `rhs` and `buffer` are mutable slice and therefore must be aligned and non-aliasing.
+        unsafe {
+            ptr.copy_from_nonoverlapping(lhs.as_ptr(), lhs_len);
+            ptr.offset(lhs_len as isize).copy_from_nonoverlapping(rhs.as_ptr(), rhs_len);
+            self.input.set_read_cursor(total_len);
+        }
+        Ok(total_len)
     }
 }
 impl<S: Sized + Read + Write> Read for BufStream<S> {
     type Error = <S as Read>::Error;
     fn read(&mut self, buffer: &mut [MaybeUninit<u8>]) -> Result<usize, Self::Error> {
         self.buffer_read()?;
-        todo!()
+        self.read_into(buffer)
     }
     fn read_vectored(&mut self, buffers: &mut [IoVecMut]) -> Result<usize, Self::Error> {
         self.buffer_read()?;
-        todo!()
+        let mut read = 0;
+        for buffer in buffers {
+            read += self.read_into(buffer.as_maybe_uninit_slice())?;
+        }
+        Ok(read)
     }
 }
 
