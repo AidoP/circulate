@@ -1,5 +1,8 @@
 use crate::RingBuffer;
 
+#[cfg(not(feature = "no_std"))]
+pub mod std;
+
 // It would be good to use raw slices instead of raw pointer and length pairs.
 // Blocking: https://github.com/rust-lang/rust/issues/74265
 
@@ -28,9 +31,7 @@ pub trait Write {
     fn flush(&mut self) -> Result<(), Self::Error>;
 }
 
-use core::{ptr::NonNull, marker::PhantomData, mem::MaybeUninit};
-#[cfg(not(feature = "no_std"))]
-use std::io;
+use core::{marker::PhantomData, mem::MaybeUninit};
 
 pub struct BufStream<S: Sized + Read + Write> {
     stream: S,
@@ -84,7 +85,7 @@ impl<S: Sized + Read + Write> BufStream<S> {
         let (lhs, rhs) = self.input.as_mut_slices();
         let ptr = buffer.as_mut_ptr() as *mut u8;
         let lhs_len = buffer.len().min(lhs.len());
-        let rhs_len = (buffer.len() - lhs.len()).min(rhs.len());
+        let rhs_len = (buffer.len() - lhs_len).min(rhs.len());
         let total_len = lhs_len + rhs_len;
         // Safety:
         // - `buffer` is valid for at least `lhs_len + rhs_len` writes.
@@ -103,6 +104,7 @@ impl<S: Sized + Read + Write> BufStream<S> {
 impl<S: Sized + Read + Write> Read for BufStream<S> {
     type Error = <S as Read>::Error;
     fn read(&mut self, buffer: &mut [MaybeUninit<u8>]) -> Result<usize, Self::Error> {
+        // TODO: avoid buffering when provided with a large enough buffer anyway.
         self.buffer_read()?;
         self.read_into(buffer)
     }
@@ -115,6 +117,15 @@ impl<S: Sized + Read + Write> Read for BufStream<S> {
         Ok(read)
     }
 }
+// impl<S: Sized + Read + Write> Write for BufStream<S> {
+//     type Error = <S as Write>::Error;
+//     fn flush(&mut self) -> Result<(), Self::Error> {
+//         self.stream.flush()
+//     }
+//     fn write(&mut self, slice: &[u8]) -> Result<usize, Self::Error> {
+//         
+//     }
+// }
 
 pub struct BufReader<> {
 
@@ -220,7 +231,7 @@ impl<'a> IoVecMut<'a> {
     #[inline]
     pub fn maybe_uninit(slice: &'a mut [MaybeUninit<u8>]) -> Self {
         Self {
-            ptr: slice.as_ptr() as *mut u8,
+            ptr: slice.as_mut_ptr() as *mut u8,
             len: slice.len(),
             _marker: PhantomData
         }
@@ -239,10 +250,8 @@ impl<'a> IoVecMut<'a> {
         }
     }
     #[inline]
-    pub fn as_ptr(&self) -> NonNull<u8> {
-        unsafe {
-            NonNull::new_unchecked(self.ptr)
-        }
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr
     }
     #[inline]
     pub fn len(&self) -> usize {

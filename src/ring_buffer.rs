@@ -242,7 +242,7 @@ impl<T> RingBuffer<T> {
     }
 
     pub fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) {
-        if self.read < self.write {
+        if self.read <= self.write {
             unsafe {(
                 core::slice::from_raw_parts_mut(self.data.as_ptr().offset(self.read as isize), self.write - self.read),
                 &mut []

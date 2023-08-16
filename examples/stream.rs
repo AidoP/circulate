@@ -1,43 +1,16 @@
-use std::io::{Error, Read as StdRead, StdinLock, StdoutLock, Write as StdWrite};
+use std::mem::MaybeUninit;
 
 use circulate::{BufStream, Read, Write};
 
-pub struct IoStream<'a> {
-    input: StdinLock<'a>,
-    output: StdoutLock<'a>,
-}
-impl<'a> Read for IoStream<'a> {
-    type Error = Error;
-    fn read(&mut self, buffer: &mut [std::mem::MaybeUninit<u8>]) -> Result<usize, Self::Error> {
-        // Safety:
-        // - `0` is a valid value for u8.
-        unsafe {
-            buffer.as_mut_ptr().write_bytes(0, buffer.len());
-            self.input.read(core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut u8, buffer.len()))
-        }
-    }
-}
-impl<'a> Write for IoStream<'a> {
-    type Error = Error;
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        self.output.flush()
-    }
-    fn write(&mut self, slice: &[u8]) -> Result<usize, Self::Error> {
-        self.output.write(slice)
-    }
-}
-
 fn main() {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
+    let mut stream = BufStream::with_capacity(std::net::TcpStream::connect("localhost:8001").unwrap(), 512);
 
-    let mut stream = BufStream::with_capacity(IoStream {
-        input: stdin.lock(),
-        output: stdout.lock(),
-    }, 512);
-
-    let mut buffer = [0; 4096];
-    let len = stream.read(unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr() as *mut _, buffer.len()) }).unwrap();
-    std::io::stdout().write_all(&buffer[..len]).unwrap();
-    std::io::stdout().flush().unwrap();
+    let mut buffer: [MaybeUninit<u8>; 4096] = unsafe { MaybeUninit::uninit().assume_init() };
+    while let Ok(len @ 1..) = stream.read(&mut buffer) {
+        println!("{len}");
+        let string = core::str::from_utf8(unsafe {
+            core::slice::from_raw_parts(buffer.as_ptr() as *const u8, len)
+        });
+        println!("recv: {string:?}")
+    }
 }
